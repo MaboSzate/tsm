@@ -1,0 +1,105 @@
+---
+title: "TSM"
+output:
+  html_document: default
+  pdf_document: default
+date: "2024-01-06"
+---
+## Bevezetés
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(xlsx)
+require(rethinking)
+require(tidyverse)
+require(caret)
+require(leaps)
+require(MASS)
+require(dplyr)
+require(tidybayes)
+require(tidybayes.rethinking)
+datauj <- read.xlsx('C:/Users/andra/Downloads/adatbazis.xlsx', sheetName = "2022")
+data <- read.xlsx('C:/Users/andra/Downloads/adatbazis.xlsx', sheetName = "2011 (prior)")
+data2uj <- datauj[rowSums(is.na(datauj)) != ncol(datauj),] 
+data2 <- data[rowSums(is.na(data)) != ncol(data),] 
+datauj <- data2uj
+data <- data2
+```
+
+## Változószelekció, priorok megválasztása
+Végzünk egy stepwise algoritmust a 2011-es adatokon.
+
+```{r}
+model <- lm(kozepfok ~ X15alatt + foglalk + haziorvos + gimnazium + vallalkozas + wc, data = data)
+step.model <- stepAIC(model, direction = "both", trace = FALSE)
+summary(step.model)
+```
+
+A haziorvos változó szignifikanciája alacsony, úgyhogy még azt is kivesszük.
+```{r}
+model <- lm(kozepfok ~ foglalk + vallalkozas + wc, data = data)
+summary(model)
+```
+Ezek lesznek a végleges változóink és a priorhoz használt értékek.
+
+## HMC szimuláció
+
+A választott változóinkkal építünk egy Bayes-i lineáris modellt. A priorjaink azt tartalmazzák, hogy a koefficiensek normális eloszlásúak, a várható érték a lineáris regresszióval kapott koefficiens, a szórás a szintén itt kapott sztenderd hiba. A célváltozó szórásához (sigma) gyengébb priort használunk. Ezt a modellt már az új (2022-es) adatbázison futtatjuk le.
+
+```{r, results='hide', message=FALSE}
+d = dplyr::select(datauj, kozepfok, foglalk, vallalkozas, wc)
+m <- ulam(alist(
+  kozepfok~dnorm(mu, sigma),
+  mu<-a + b1*foglalk + b2*vallalkozas + b3*wc,
+  a~dnorm(0.60151,0.03994),
+  b1~dnorm(0.14834,0.05924),
+  b2~dnorm(0.28915, 0.04762),
+  b3~dnorm(-1.32839,0.07291),
+  sigma~dunif(0,0.15)
+), data=d, chains=4, cores=4)
+```
+```{r}
+precis(m)
+```
+
+Ahogy látható, a lineáris regressziótól kicsit eltérő koefficienseket kapunk. A célváltozó szórása 0.03 környékére konvergált be, ami némileg meglepő, mert a valódi szórása 0.08 körüli. Az rhat érték a kritikusnak tekintett 1.05 alatt van minden változónál. Nézzük meg az eredményeket vizuálisan.
+```{r, warning=FALSE}
+pairs(m)
+```
+
+Végezetül nézzük meg a kimeneti- és rankábrát.
+```{r}
+traceplot(m, chain=1)
+trankplot(m)
+```
+
+## A modell erőssége
+Nézzük meg, hogy a kapott Bayes-i modell mennyire jól tudja előrejelezni a célváltozót. Hasonlítsuk össze a tényleges értékeket a modell szerint kapott értékekkel (utóbbi 1000 mintavétel átlaga).
+```{r}
+pred = predicted_draws(m, datauj, ndraws = 1000)
+n <- length(pred$.prediction)/1000
+pred$input <- rep(1:n, each=1000)
+mean_predictions <- aggregate(pred$.prediction, by=list(pred$input), FUN=mean)
+eredeti = datauj$kozepfok
+bayes = mean_predictions$x
+plot(datauj$kozepfok, mean_predictions$x)
+abline(0,1,col='red')
+```
+
+Összehasonlításként ugyanez az ábra az egyszerű lineáris regresszióval kapott modellt használva:
+```{r}
+linreg = predict(model, datauj)
+plot(datauj$kozepfok, linreg)
+abline(0,1, col='red')
+```
+
+A hiba-négyzetösszegek a két modellnél (itt is az első a Bayes-i modellhez tartozó érték):
+```{r}
+sum((datauj$kozepfok - mean_predictions$x)^2)
+sum((datauj$kozepfok - predlin)^2)
+```
+
+Látható, hogy a modell jelentősen javítja a hagyományos lineáris regressziót. Főképp a magasabb értékeket jelzi előre pontosabban, melyeket a lineáris regresszió alulbecsüli.
+
+
